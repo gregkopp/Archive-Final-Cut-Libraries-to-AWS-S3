@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Archive to S3
+# This script archives files and uploads them to an Amazon S3 bucket using multipart upload.
+# © 2025 Greg Kopp. All rights reserved.
+# This script is licensed under the Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0) license.
+
 # Check if the bucket name is provided as a command line argument
 if [ -z "$1" ]; then
     echo "Usage: $0 <bucket-name>"
