@@ -1,21 +1,22 @@
 #!/bin/bash
 
-# Archive to S3
-# This script archives files and uploads them to an Amazon S3 bucket using multipart upload.
-# © 2025 Greg Kopp. All rights reserved.
-# This script is licensed under the Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0) license.
+# Check if the script is already running with the same arguments
+if pgrep -f "$0 $1 $2" > /dev/null; then
+    echo "Script is already running with the same arguments. Exiting."
+    exit 1
+fi
 
 # Check if the bucket name is provided as a command line argument
 if [ -z "$1" ]; then
-    echo "Usage: $0 <bucket-name>"
+    echo "Usage: $0 <bucket-name> [source-path]"
     exit 1
 fi
 
 # Define the S3 bucket name
 BUCKET_NAME="$1"
 
-# Get the current directory
-SOURCE_PATH=$(pwd)
+# Get the source path (current directory if not provided)
+SOURCE_PATH="${2:-$(pwd)}"
 
 # Check if the AWS CLI is installed
 if ! command -v aws &>/dev/null; then
@@ -178,6 +179,11 @@ upload_directory_and_contents() {
 
         # Recurse through the directories here and upload the files within
         find "$dir" -mindepth 1 -maxdepth 1 -type d | while read -r subdir; do
+            # Check if the directory or its contents are in use
+            if lsof +D "$subdir" >/dev/null 2>&1; then
+                echo "Skipping directory (files in use): $(basename "$subdir")"
+                continue
+            fi
             upload_directory_and_contents "$subdir"
         done
     fi
