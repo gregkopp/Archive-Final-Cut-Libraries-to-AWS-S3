@@ -18,8 +18,8 @@ BUCKET_NAME="$1"
 # Get the source path (current directory if not provided)
 SOURCE_PATH="${2:-$(pwd)}"
 
-# Check if the AWS CLI is installed
-if ! command -v aws &>/dev/null; then
+AWS_CLI_PATH=(which aws)
+if [ -z "$AWS_CLI_PATH" ]; then
     echo "AWS CLI not found. Please install it and configure your credentials."
     exit 1
 fi
@@ -28,7 +28,7 @@ fi
 check_file_exists_in_s3() {
     local file_path="$1"
     echo "Checking if $(basename "$file_path") exists in S3 bucket..."
-    if aws s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
+    if $AWS_CLI_PATH s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
         echo "$(basename "$file_path") already exists in S3. Skipping upload."
         return 0  # File exists
     else
@@ -40,8 +40,7 @@ check_file_exists_in_s3() {
 verify_file_exists_in_s3() {
     local file_path="$1"
     echo "Verifying if $(basename "$file_path") exists in S3 bucket..."
-    echo "aws s3 ls ${file_path}"
-    if aws s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
+    if $AWS_CLI_PATH s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
         echo "$(basename "$file_path") exists in S3."
         return 0  # File exists
     else
@@ -79,10 +78,10 @@ multipart_upload_to_s3() {
 
     # Check for existing multipart upload
     echo "Checking for existing multipart upload..."
-    upload_id=$(aws s3api list-multipart-uploads --bucket "$BUCKET_NAME" --query "Uploads[?Key=='$s3_path'].UploadId" --output text)
-    if [ -z "$upload_id" ]; then
+    upload_id=$($AWS_CLI_PATH s3api list-multipart-uploads --bucket "$BUCKET_NAME" --query "Uploads[?Key=='$s3_path'].UploadId" --output text)
+    if [ -z "$upload_id" ] || [ "$upload_id" == "None" ]; then
         # Initiate new multipart upload if none exists
-        upload_id=$(aws s3api create-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --storage-class DEEP_ARCHIVE --query UploadId --output text)
+        upload_id=$($AWS_CLI_PATH s3api create-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --storage-class DEEP_ARCHIVE --query UploadId --output text)
         if [ $? -ne 0 ]; then
             echo "Error initiating multipart upload"
             exit 1
@@ -93,7 +92,7 @@ multipart_upload_to_s3() {
     fi
 
     # List existing parts
-    existing_parts=$(aws s3api list-parts --bucket "$BUCKET_NAME" --key "$s3_path" --upload-id "$upload_id" --query 'Parts[].{ETag:ETag,PartNumber:PartNumber}' --output json)
+    existing_parts=$($AWS_CLI_PATH s3api list-parts --bucket "$BUCKET_NAME" --key "$s3_path" --upload-id "$upload_id" --query 'Parts[].{ETag:ETag,PartNumber:PartNumber}' --output json)
 
     # Upload each part
     part_number=1
@@ -107,7 +106,7 @@ multipart_upload_to_s3() {
             etag=$(echo "$existing_parts" | jq -r ".[] | select(.PartNumber == $part_number) | .ETag")
         else
             echo "Uploading part $part_number..."
-            etag=$(aws s3api upload-part --bucket "$BUCKET_NAME" --key "$s3_path" --part-number $part_number --body "$part" --upload-id "$upload_id" --query ETag --output text)
+            etag=$($AWS_CLI_PATH s3api upload-part --bucket "$BUCKET_NAME" --key "$s3_path" --part-number $part_number --body "$part" --upload-id "$upload_id" --query ETag --output text)
             if [ $? -ne 0 ]; then
                 echo "Error uploading part $part_number"
                 exit 1
@@ -119,7 +118,7 @@ multipart_upload_to_s3() {
 
     # Complete multipart upload
     parts="[${parts%,}]"
-    aws s3api complete-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --upload-id "$upload_id" --multipart-upload "{\"Parts\": $parts}"
+    $AWS_CLI_PATH s3api complete-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --upload-id "$upload_id" --multipart-upload "{\"Parts\": $parts}"
     if [ $? -ne 0 ]; then
         echo "Error completing multipart upload"
         exit 1
