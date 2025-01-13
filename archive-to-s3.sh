@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Function to get the current date and time
+current_datetime() {
+    date +"%Y-%m-%d %H:%M:%S.%3N"
+}
+
 # Check if the script is already running with the same arguments
 if pgrep -f "$0 $1 $2" > /dev/null; then
     echo "Script is already running with the same arguments. Exiting."
@@ -18,18 +23,18 @@ BUCKET_NAME="$1"
 # Get the source path (current directory if not provided)
 SOURCE_PATH="${2:-$(pwd)}"
 
-AWS_CLI_PATH=(which aws)
+AWS_CLI_PATH="/usr/local/bin/aws"
 if [ -z "$AWS_CLI_PATH" ]; then
-    echo "AWS CLI not found. Please install it and configure your credentials."
+    echo "$(current_datetime) AWS CLI not found. Please install it and configure your credentials."
     exit 1
 fi
 
 # Function to check if a file exists in S3
 check_file_exists_in_s3() {
     local file_path="$1"
-    echo "Checking if $(basename "$file_path") exists in S3 bucket..."
+    echo "$(current_datetime) Checking if $(basename "$file_path") exists in S3 bucket..."
     if $AWS_CLI_PATH s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
-        echo "$(basename "$file_path") already exists in S3. Skipping upload."
+        echo "$(current_datetime) $(basename "$file_path") already exists in S3. Skipping upload."
         return 0  # File exists
     else
         return 1  # File does not exist
@@ -39,9 +44,9 @@ check_file_exists_in_s3() {
 # Function to verify file exists in S3
 verify_file_exists_in_s3() {
     local file_path="$1"
-    echo "Verifying if $(basename "$file_path") exists in S3 bucket..."
+    echo "$(current_datetime) Verifying if $(basename "$file_path") exists in S3 bucket..."
     if $AWS_CLI_PATH s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
-        echo "$(basename "$file_path") exists in S3."
+        echo "$(current_datetime) $(basename "$file_path") exists in S3."
         return 0  # File exists
     else
         return 1  # File does not exist
@@ -53,14 +58,13 @@ create_split_zip_file() {
     local part_size="5g"
 
     # Check if the file has already been split
-    echo "Checking for existing split files: ${dir}.zip"
+    echo "$(current_datetime) Checking for existing split files: $(basename "${dir}").zip"
     if compgen -G "${dir}.zip.???" > /dev/null; then
-        echo "File has already been split. Skipping 7z command."
+        echo "$(current_datetime) File has already been split. Skipping 7z command."
         return 0
     fi
 
-    echo "Creating split 7z file $dir.zip..."
-    echo "7z a -mx1 -v$part_size $dir.zip $dir"
+    echo "$(current_datetime) Creating split 7z file $dir.zip..."
     7z a -mx1 -v"$part_size" "$dir".zip "$dir" || { echo "Error creating split 7z file"; exit 1; }
 }
 
@@ -72,23 +76,25 @@ multipart_upload_to_s3() {
     # Create split zip file
     create_split_zip_file "$dir"
     if [ $? -ne 0 ]; then
-        echo "Error creating split zip file. Skipping upload."
+        echo "$(current_datetime) Error creating split zip file $dir. Skipping upload."
         return 1
     fi
 
     # Check for existing multipart upload
-    echo "Checking for existing multipart upload..."
+    echo "$(current_datetime) Checking for existing multipart upload..."
+
     upload_id=$($AWS_CLI_PATH s3api list-multipart-uploads --bucket "$BUCKET_NAME" --query "Uploads[?Key=='$s3_path'].UploadId" --output text)
     if [ -z "$upload_id" ] || [ "$upload_id" == "None" ]; then
         # Initiate new multipart upload if none exists
+        echo "$(current_datetime) Initiating new multipart upload"
         upload_id=$($AWS_CLI_PATH s3api create-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --storage-class DEEP_ARCHIVE --query UploadId --output text)
         if [ $? -ne 0 ]; then
-            echo "Error initiating multipart upload"
+            echo "$(current_datetime) Error initiating multipart upload"
             exit 1
         fi
-        echo "Initiated multipart upload with UploadId: $upload_id"
+        echo "$(current_datetime) Initiated multipart upload with UploadId: $upload_id"
     else
-        echo "Resuming multipart upload with UploadId: $upload_id"
+        echo "$(current_datetime) Resuming multipart upload with UploadId: $upload_id"
     fi
 
     # List existing parts
@@ -98,17 +104,15 @@ multipart_upload_to_s3() {
     part_number=1
     parts=""
     for part in "${dir}".zip.*; do
-        echo "Uploading part $part..."
-
         # Check if part already exists
         if echo "$existing_parts" | grep -q "\"PartNumber\": $part_number"; then
-            echo "Part $part_number already exists. Skipping upload."
+            echo "$(current_datetime) Part $part_number already exists. Skipping upload."
             etag=$(echo "$existing_parts" | jq -r ".[] | select(.PartNumber == $part_number) | .ETag")
         else
-            echo "Uploading part $part_number..."
+            echo "$(current_datetime) Uploading part $part_number..."
             etag=$($AWS_CLI_PATH s3api upload-part --bucket "$BUCKET_NAME" --key "$s3_path" --part-number $part_number --body "$part" --upload-id "$upload_id" --query ETag --output text)
             if [ $? -ne 0 ]; then
-                echo "Error uploading part $part_number"
+                echo "$(current_datetime) Error uploading part $part_number"
                 exit 1
             fi
         fi
@@ -120,10 +124,10 @@ multipart_upload_to_s3() {
     parts="[${parts%,}]"
     $AWS_CLI_PATH s3api complete-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --upload-id "$upload_id" --multipart-upload "{\"Parts\": $parts}"
     if [ $? -ne 0 ]; then
-        echo "Error completing multipart upload"
+        echo "$(current_datetime) Error completing multipart upload"
         exit 1
     fi
-    echo "Completed multipart upload for $s3_path"
+    echo "$(current_datetime) Completed multipart upload for $s3_path"
 }
 
 # Function to upload a file to S3
@@ -131,14 +135,14 @@ upload_to_s3() {
     local dir="$1"
     local s3_path="$2"
     
-    echo "Uploading $dir to $s3_path..."
+    echo "$(current_datetime) Uploading $(basename "$dir") to $s3_path..."
     multipart_upload_to_s3 "$dir" "$s3_path"
 
     # Verify that the file was uploaded and recombined
     if verify_file_exists_in_s3 "$s3_path"; then
-        echo "Verification successful: $dir was uploaded and recombined correctly."
+        echo "$(current_datetime) Verification successful: $dir was uploaded and recombined correctly."
     else
-        echo "Verification failed: $dir"
+        echo "$(current_datetime) Verification failed: $dir"
         exit 1
     fi
 }
@@ -155,13 +159,13 @@ compress_and_upload_fcp_library() {
     if ! check_file_exists_in_s3 "$s3_path"; then
         # Upload the compressed file to S3
         if upload_to_s3 "$dir" "$s3_path"; then
-            echo "Removing local zip file: $(basename "$zip_file")"
+            echo "$(current_datetime) Removing local zip file: $(basename "$zip_file")"
             rm "$zip_file".*
         else
-            echo "**** Warning: Upload failed. Keeping local zip file: $(basename "$zip_file")"
+            echo "$(current_datetime) Upload failed. Keeping local zip file: $(basename "$zip_file")"
         fi
     else
-        echo "**** Warning: $(basename "$zip_file") already exists in S3. Keeping local zip file: $(basename "$zip_file")"
+        echo "*$(current_datetime) $(basename "$zip_file") already exists in S3. Keeping local zip file: $(basename "$zip_file")"
     fi
 }
 
@@ -171,16 +175,16 @@ upload_directory_and_contents() {
     echo ""
 
     if [[ "$dir" == *.fcpbundle ]]; then
-        echo "Found Final Cut Pro library: $(basename "$dir")"
+        echo "$(current_datetime) Found Final Cut Pro library: $(basename "$dir")"
         compress_and_upload_fcp_library "$dir"
     else
-        echo "Processing directory: $(basename "$dir")"
+        echo "$(current_datetime) Processing directory: $(basename "$dir")"
 
         # Recurse through the directories here and upload the files within
         find "$dir" -mindepth 1 -maxdepth 1 -type d | while read -r subdir; do
             # Check if the directory or its contents are in use
             if lsof +D "$subdir" >/dev/null 2>&1; then
-                echo "Skipping directory (files in use): $(basename "$subdir")"
+                echo "$(current_datetime) Skipping directory (files in use): $(basename "$subdir")"
                 continue
             fi
             upload_directory_and_contents "$subdir"
@@ -188,8 +192,8 @@ upload_directory_and_contents() {
     fi
 }
 
-echo "Uploading files and Final Cut Pro libraries from $SOURCE_PATH to S3 bucket: $BUCKET_NAME"
+echo "$(current_datetime) Uploading files and Final Cut Pro libraries from $SOURCE_PATH to S3 bucket: $BUCKET_NAME"
 
 upload_directory_and_contents "$SOURCE_PATH"
 
-echo "All files and Final Cut Pro libraries have been processed for upload to S3 bucket: $BUCKET_NAME"
+echo "$(current_datetime) All files and Final Cut Pro libraries have been processed for upload to S3 bucket: $BUCKET_NAME"
