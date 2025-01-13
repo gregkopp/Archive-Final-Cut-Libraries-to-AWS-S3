@@ -1,8 +1,38 @@
 #!/bin/bash
 
-# Function to get the current date and time
+# Add notification helper functions at the start of the script
+send_notification() {
+    local title="$1"
+    local message="$2"
+    osascript -e "display notification \"$message\" with title \"$title\""
+}
+
+send_alert() {
+    local title="$1"
+    local message="$2"
+    osascript -e "display alert \"$title\" message \"$message\""
+}
+
+# Function to get the current date and time with milliseconds
 current_datetime() {
-    date +"%Y-%m-%d %H:%M:%S.%3N"
+    # macOS gdate command with nanoseconds if available
+    # brew install coreutils
+    if command -v gdate >/dev/null 2>&1; then
+        gdate +"%Y-%m-%d %H:%M:%S.%3N"
+    else
+        # Fallback using perl for millisecond precision
+        perl -MTime::HiRes -e '
+            $time = Time::HiRes::time();
+            ($sec, $min, $hour, $day, $month, $year) = localtime($time);
+            $year += 1900;
+            $month += 1;
+            $milliseconds = int(($time * 1000) % 1000);
+            printf("%04d-%02d-%02d %02d:%02d:%02d.%03d\n", 
+                $year, $month, $day, 
+                $hour, $min, $sec, 
+                $milliseconds);
+        '
+    fi
 }
 
 # Check if the script is already running with the same arguments
@@ -65,6 +95,7 @@ create_split_zip_file() {
     fi
 
     echo "$(current_datetime) Creating split 7z file $dir.zip..."
+    # brew install p7zip
     7z a -mx1 -v"$part_size" "$dir".zip "$dir" || { echo "Error creating split 7z file"; exit 1; }
 }
 
@@ -77,12 +108,13 @@ multipart_upload_to_s3() {
     create_split_zip_file "$dir"
     if [ $? -ne 0 ]; then
         echo "$(current_datetime) Error creating split zip file $dir. Skipping upload."
+        send_notification "S3 Upload Error" "Failed to create split file for $(basename "$dir")"
         return 1
     fi
 
     # Check for existing multipart upload
     echo "$(current_datetime) Checking for existing multipart upload..."
-
+    # echo "$AWS_CLI_PATH s3api list-multipart-uploads --bucket \"$BUCKET_NAME\" --query \"Uploads[?Key=='$s3_path'].UploadId\" --output text"
     upload_id=$($AWS_CLI_PATH s3api list-multipart-uploads --bucket "$BUCKET_NAME" --query "Uploads[?Key=='$s3_path'].UploadId" --output text)
     if [ -z "$upload_id" ] || [ "$upload_id" == "None" ]; then
         # Initiate new multipart upload if none exists
@@ -90,6 +122,7 @@ multipart_upload_to_s3() {
         upload_id=$($AWS_CLI_PATH s3api create-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --storage-class DEEP_ARCHIVE --query UploadId --output text)
         if [ $? -ne 0 ]; then
             echo "$(current_datetime) Error initiating multipart upload"
+            send_alert "S3 Upload Error" "Failed to initiate multipart upload for $(basename "$dir")"
             exit 1
         fi
         echo "$(current_datetime) Initiated multipart upload with UploadId: $upload_id"
@@ -112,6 +145,7 @@ multipart_upload_to_s3() {
             echo "$(current_datetime) Uploading part $part_number..."
             etag=$($AWS_CLI_PATH s3api upload-part --bucket "$BUCKET_NAME" --key "$s3_path" --part-number $part_number --body "$part" --upload-id "$upload_id" --query ETag --output text)
             if [ $? -ne 0 ]; then
+                send_alert "S3 Upload Error" "Failed to upload part $part_number for $(basename "$dir")"
                 echo "$(current_datetime) Error uploading part $part_number"
                 exit 1
             fi
@@ -128,6 +162,7 @@ multipart_upload_to_s3() {
         exit 1
     fi
     echo "$(current_datetime) Completed multipart upload for $s3_path"
+    send_notification "S3 Upload Complete" "Successfully uploaded $(basename "$dir") to S3"
 }
 
 # Function to upload a file to S3
@@ -140,9 +175,10 @@ upload_to_s3() {
 
     # Verify that the file was uploaded and recombined
     if verify_file_exists_in_s3 "$s3_path"; then
-        echo "$(current_datetime) Verification successful: $dir was uploaded and recombined correctly."
+        echo "$(current_datetime) Verification successful: $(basename "$dir") was uploaded and recombined correctly."
     else
-        echo "$(current_datetime) Verification failed: $dir"
+        send_alert "S3 Upload Error" "Verification failed for $(basename "$dir")"
+            echo "$(current_datetime) Verification failed: $(basename "$dir")"
         exit 1
     fi
 }
