@@ -10,7 +10,7 @@ send_notification() {
 send_alert() {
     local title="$1"
     local message="$2"
-    osascript -e "display alert \"$title\" message \"$message\""
+    osascript -e "tell application \"System Events\" to display alert \"$title\" message \"$message\" buttons {\"OK\"} giving up after 10" &
 }
 
 # Function to get the current date and time with milliseconds
