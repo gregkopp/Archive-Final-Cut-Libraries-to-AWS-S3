@@ -130,29 +130,12 @@ create_split_zip_file() {
     echo "$(current_datetime) Checking for existing split files: $(basename "${dir}").zip"
     
     if compgen -G "${dir}.zip.???" > /dev/null; then
-        # Calculate expected number of parts using macOS compatible du
-        local dir_size=$(du -k "$dir" | cut -f1)
-        dir_size=$((dir_size * 1024))  # Convert KB to bytes
-        local expected_parts=$(( (dir_size + part_size_bytes - 1) / part_size_bytes ))
-        
-        # Count actual parts
-        local actual_parts=$(ls -1 "${dir}".zip.??? 2>/dev/null | wc -l)
-        
-        echo "$(current_datetime) Directory size: $dir_size bytes"
-        echo "$(current_datetime) Expected parts: $expected_parts"
-        echo "$(current_datetime) Actual parts: $actual_parts"
-        
-        if [ "$actual_parts" -eq "$expected_parts" ]; then
-            echo "$(current_datetime) Split file parts verified. Skipping 7z command."
-            return 0
-        else
-            echo "$(current_datetime) Split file parts mismatch. Re-creating archive."
-            rm "${dir}".zip.???
-        fi
+        echo "$(current_datetime) Split files exist. Skipping 7z command."
+        return 0
     fi
 
     echo "$(current_datetime) Creating split 7z file $dir.zip..."
-    /usr/local/bin/7z a -mx1 -v"$part_size" "$dir".zip "$dir" || { 
+    /usr/local/bin/7z a -mx0 -v"$part_size" "$dir".zip "$dir" || { 
         echo "$(current_datetime) Error creating split 7z file"; 
         exit 1; 
     }
@@ -286,6 +269,8 @@ process_uploads() {
         work_found=1
         echo "$(current_datetime) Found ${#incomplete_uploads[@]} incomplete uploads"
         for upload in "${incomplete_uploads[@]}"; do
+            echo ""
+            echo "----------------------------------------"
             echo "$(current_datetime) Resuming upload: $(basename "$upload")"
             local relative_path=${upload#"$SOURCE_PATH/"}
             echo relative_path "$relative_path"
@@ -302,6 +287,8 @@ process_uploads() {
     local new_files=0
     while IFS= read -r dir; do
         if [ -n "$dir" ]; then
+            echo ""
+            echo "----------------------------------------"
             local zip_file="${dir}.zip"
             local relative_path=${dir#"$SOURCE_PATH/"}
             local s3_path="$(dirname "$relative_path")/$(basename "$zip_file")"
@@ -329,5 +316,4 @@ main() {
 }
 
 main "$SOURCE_PATH"
-
 exit 0
