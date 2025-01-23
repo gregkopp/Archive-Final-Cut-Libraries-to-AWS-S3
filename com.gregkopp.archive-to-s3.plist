@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>com.gregkopp.archive-to-s3</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>/usr/local/bin/archive-to-s3.sh</string>
+            <string>**** S3 Bucket Name ****</string>
+            <string>**** Path to Local FCP Archive Folder ****</string>
+        </array>
+        <key>StartInterval</key>
+        <integer>900</integer>
+        <key>StandardOutPath</key>
+        <string>/tmp/archive-to-s3.out</string>
+        <key>StandardErrorPath</key>
+        <string>/tmp/archive-to-s3.err</string>
+        <key>RunAtLoad</key>
+        <true />
+        <key>UserName</key>
+        <string>**** Username to run script as ****</string>
+        <key>KeepAlive</key>
+        <dict>
+            <key>SuccessfulExit</key>
+            <false />
+            <key>Crashed</key>
+            <true />
+        </dict>
+    </dict>
+</plist>

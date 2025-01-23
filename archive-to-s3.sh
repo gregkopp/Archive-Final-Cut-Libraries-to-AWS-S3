@@ -74,29 +74,88 @@ check_file_exists_in_s3() {
 # Function to verify file exists in S3
 verify_file_exists_in_s3() {
     local file_path="$1"
-    echo "$(current_datetime) Verifying if $(basename "$file_path") exists in S3 bucket..."
-    if $AWS_CLI_PATH s3 ls "s3://$BUCKET_NAME/$file_path" &>/dev/null; then
-        echo "$(current_datetime) $(basename "$file_path") exists in S3."
-        return 0  # File exists
+    echo "$(current_datetime) Verifying if $(basename "$file_path").zip exists in S3 bucket..."
+    
+    # Calculate total size of all zip parts
+    local local_size=0
+    local base_path="${file_path%.zip}"
+    local dir_path=$(dirname "$base_path")
+    local file_name=$(basename "$base_path")
+    
+    # Sum sizes using find with proper path handling
+    while IFS= read -r -d '' part; do
+        local part_size=$(stat -f%z "$dir_path/$part")
+        if [ $? -ne 0 ]; then
+            echo "$(current_datetime) Error getting size for: $part" >&2
+            return 1
+        fi
+        local_size=$((local_size + part_size))
+    done < <(cd "$dir_path" && find . -maxdepth 1 -name "${file_name}.zip.???" -print0)
+
+    local relative_path=${dir_path#"$SOURCE_PATH/"}
+    local s3_path="$relative_path/$file_name.zip"
+    local s3_size=$($AWS_CLI_PATH s3api head-object \
+        --bucket "$BUCKET_NAME" \
+        --key "$s3_path" \
+        --query 'ContentLength' \
+        --output text 2>/dev/null)
+    
+    if [ $? -ne 0 ] || [ -z "$s3_size" ]; then
+        echo "$(current_datetime) File $(basename "$file_path") not found in S3 or size unavailable"
+        return 1
+    fi
+    
+    # Ensure we have numeric values
+    if ! [[ "$local_size" =~ ^[0-9]+$ ]] || ! [[ "$s3_size" =~ ^[0-9]+$ ]]; then
+        echo "$(current_datetime) Invalid size values - local: $local_size, S3: $s3_size" >&2
+        return 1
+    fi
+    
+    # Compare sizes
+    if [ "$local_size" -eq "$s3_size" ]; then
+        echo "$(current_datetime) File $(basename "$file_path") exists in S3 with matching size ($local_size bytes)"
+        return 0
     else
-        return 1  # File does not exist
+        echo "$(current_datetime) File $(basename "$file_path") exists in S3 but size mismatch (local: $local_size, S3: $s3_size bytes)"
+        return 1
     fi
 }
 
 create_split_zip_file() {
     local dir="$1"
     local part_size="5g"
+    local part_size_bytes=$((5 * 1024 * 1024 * 1024))  # 5GB in bytes
 
     # Check if the file has already been split
     echo "$(current_datetime) Checking for existing split files: $(basename "${dir}").zip"
+    
     if compgen -G "${dir}.zip.???" > /dev/null; then
-        echo "$(current_datetime) File has already been split. Skipping 7z command."
-        return 0
+        # Calculate expected number of parts using macOS compatible du
+        local dir_size=$(du -k "$dir" | cut -f1)
+        dir_size=$((dir_size * 1024))  # Convert KB to bytes
+        local expected_parts=$(( (dir_size + part_size_bytes - 1) / part_size_bytes ))
+        
+        # Count actual parts
+        local actual_parts=$(ls -1 "${dir}".zip.??? 2>/dev/null | wc -l)
+        
+        echo "$(current_datetime) Directory size: $dir_size bytes"
+        echo "$(current_datetime) Expected parts: $expected_parts"
+        echo "$(current_datetime) Actual parts: $actual_parts"
+        
+        if [ "$actual_parts" -eq "$expected_parts" ]; then
+            echo "$(current_datetime) Split file parts verified. Skipping 7z command."
+            return 0
+        else
+            echo "$(current_datetime) Split file parts mismatch. Re-creating archive."
+            rm "${dir}".zip.???
+        fi
     fi
 
     echo "$(current_datetime) Creating split 7z file $dir.zip..."
-    # brew install p7zip
-    7z a -mx1 -v"$part_size" "$dir".zip "$dir" || { echo "Error creating split 7z file"; exit 1; }
+    /usr/local/bin/7z a -mx1 -v"$part_size" "$dir".zip "$dir" || { 
+        echo "$(current_datetime) Error creating split 7z file"; 
+        exit 1; 
+    }
 }
 
 # Function to upload a file to S3 using multipart upload
@@ -114,7 +173,7 @@ multipart_upload_to_s3() {
 
     # Check for existing multipart upload
     echo "$(current_datetime) Checking for existing multipart upload..."
-    # echo "$AWS_CLI_PATH s3api list-multipart-uploads --bucket \"$BUCKET_NAME\" --query \"Uploads[?Key=='$s3_path'].UploadId\" --output text"
+    
     upload_id=$($AWS_CLI_PATH s3api list-multipart-uploads --bucket "$BUCKET_NAME" --query "Uploads[?Key=='$s3_path'].UploadId" --output text)
     if [ -z "$upload_id" ] || [ "$upload_id" == "None" ]; then
         # Initiate new multipart upload if none exists
@@ -158,78 +217,117 @@ multipart_upload_to_s3() {
     parts="[${parts%,}]"
     $AWS_CLI_PATH s3api complete-multipart-upload --bucket "$BUCKET_NAME" --key "$s3_path" --upload-id "$upload_id" --multipart-upload "{\"Parts\": $parts}"
     if [ $? -ne 0 ]; then
-        echo "$(current_datetime) Error completing multipart upload"
-        exit 1
+        echo "$(current_datetime) Error completing multipart upload" >&2
+        send_alert "S3 Upload Error" "Failed to complete upload for $(basename "$dir")"
+        return 1
     fi
-    echo "$(current_datetime) Completed multipart upload for $s3_path"
-    send_notification "S3 Upload Complete" "Successfully uploaded $(basename "$dir") to S3"
-}
-
-# Function to upload a file to S3
-upload_to_s3() {
-    local dir="$1"
-    local s3_path="$2"
     
-    echo "$(current_datetime) Uploading $(basename "$dir") to $s3_path..."
-    multipart_upload_to_s3 "$dir" "$s3_path"
-
-    # Verify that the file was uploaded and recombined
-    if verify_file_exists_in_s3 "$s3_path"; then
-        echo "$(current_datetime) Verification successful: $(basename "$dir") was uploaded and recombined correctly."
+    # Verify upload and clean up
+    echo "$(current_datetime) Verifying upload for $s3_path..."
+    if verify_file_exists_in_s3 "$dir"; then
+        echo "$(current_datetime) Upload verified. Cleaning up local zip files..."
+        rm "${dir}".zip.??? 2>/dev/null
+        echo "$(current_datetime) Local zip files removed for $(basename "$dir")"
+        send_notification "S3 Upload Complete" "Successfully uploaded and verified $(basename "$dir")"
     else
-        send_alert "S3 Upload Error" "Verification failed for $(basename "$dir")"
-            echo "$(current_datetime) Verification failed: $(basename "$dir")"
-        exit 1
+        echo "$(current_datetime) Upload verification failed for $(basename "$dir"). Keeping local zip files." >&2
+        send_alert "S3 Upload Warning" "Upload verification failed for $(basename "$dir"). Local files preserved."
+        return 1
     fi
+    
+    return 0
 }
 
-# Function to compress and upload a Final Cut Pro library
-compress_and_upload_fcp_library() {
-    local dir="$1"
-    local zip_file="${dir}.zip"
+find_zip_parts() {
+    local search_dir="$1"
+    find "$search_dir" -name "*.zip.001" -type f
+}
 
-    # Define the S3 path for the compressed library
-    local relative_path=${dir#"$SOURCE_PATH/"}
-    local s3_path="$(dirname "$relative_path")/$(basename "$zip_file")"
-
-    if ! check_file_exists_in_s3 "$s3_path"; then
-        # Upload the compressed file to S3
-        if upload_to_s3 "$dir" "$s3_path"; then
-            echo "$(current_datetime) Removing local zip file: $(basename "$zip_file")"
-            rm "$zip_file".*
-        else
-            echo "$(current_datetime) Upload failed. Keeping local zip file: $(basename "$zip_file")"
+get_incomplete_uploads() {
+    local search_dir="$1"
+    local incomplete=()
+    
+    while IFS= read -r zip_part; do
+        local base_name=$(basename "${zip_part}" .zip.001)
+        local dir_path=$(dirname "${zip_part}")
+        local zip_file="${base_name}.zip"
+        local relative_path=${dir_path#"$SOURCE_PATH/"}
+        local s3_path="$relative_path/$zip_file"
+        
+        # Check for existing multipart upload
+        upload_id=$($AWS_CLI_PATH s3api list-multipart-uploads \
+            --bucket "$BUCKET_NAME" \
+            --query "Uploads[?Key=='$s3_path'].UploadId" \
+            --output text)
+            
+        if [ -n "$upload_id" ] && [ "$upload_id" != "None" ]; then
+            incomplete+=("${dir_path}/${base_name}")
         fi
-    else
-        echo "*$(current_datetime) $(basename "$zip_file") already exists in S3. Keeping local zip file: $(basename "$zip_file")"
-    fi
+    done < <(find_zip_parts "$search_dir")
+    
+    echo "${incomplete[@]}"
 }
 
-# Function to upload directories and their contents
-upload_directory_and_contents() {
-    local dir="$1"
-    echo ""
+process_uploads() {
+    local source_dir="$1"
+    local work_found=0
 
-    if [[ "$dir" == *.fcpbundle ]]; then
-        echo "$(current_datetime) Found Final Cut Pro library: $(basename "$dir")"
-        compress_and_upload_fcp_library "$dir"
-    else
-        echo "$(current_datetime) Processing directory: $(basename "$dir")"
-
-        # Recurse through the directories here and upload the files within
-        find "$dir" -mindepth 1 -maxdepth 1 -type d | while read -r subdir; do
-            # Check if the directory or its contents are in use
-            if lsof +D "$subdir" >/dev/null 2>&1; then
-                echo "$(current_datetime) Skipping directory (files in use): $(basename "$subdir")"
-                continue
-            fi
-            upload_directory_and_contents "$subdir"
+    echo "$(current_datetime) Scanning for incomplete uploads in ${source_dir}..."
+    
+    # Initialize array
+    declare -a incomplete_uploads
+    
+    # Read into array with proper space handling
+    while IFS= read -r line; do
+        [ -n "$line" ] && incomplete_uploads+=("$line")
+    done < <(get_incomplete_uploads "$source_dir")
+    
+    if [ ${#incomplete_uploads[@]} -gt 0 ]; then
+        work_found=1
+        echo "$(current_datetime) Found ${#incomplete_uploads[@]} incomplete uploads"
+        for upload in "${incomplete_uploads[@]}"; do
+            echo "$(current_datetime) Resuming upload: $(basename "$upload")"
+            local relative_path=${upload#"$SOURCE_PATH/"}
+            echo relative_path "$relative_path"
+            local s3_path="$(dirname "$relative_path")/$(basename "$upload").zip"
+            echo s3_path "$s3_path"
+            # TODO Fix the s3 path that is the expected second argument
+            echo multipart_upload_to_s3 "$upload" "$s3_path"
+            multipart_upload_to_s3 "$upload" "$s3_path"
         done
     fi
+    
+    # Second pass - process new files
+    echo "$(current_datetime) Scanning for new files..."
+    local new_files=0
+    while IFS= read -r dir; do
+        if [ -n "$dir" ]; then
+            local zip_file="${dir}.zip"
+            local relative_path=${dir#"$SOURCE_PATH/"}
+            local s3_path="$(dirname "$relative_path")/$(basename "$zip_file")"
+            if check_file_exists_in_s3 "$s3_path"; then
+                echo "$(current_datetime) Skipping ${dir} - already processed"
+                continue
+            fi
+            new_files=1
+            work_found=1
+            echo "$(current_datetime) Processing library: $(basename "$dir")"
+            multipart_upload_to_s3 "$dir" "$s3_path"
+        fi
+    done < <(find "$source_dir" -name "*.fcpbundle" -type d)
+
+    if [ $work_found -eq 0 ]; then
+        echo "$(current_datetime) No work found. Exiting successfully."
+        exit 0
+    fi
 }
 
-echo "$(current_datetime) Uploading files and Final Cut Pro libraries from $SOURCE_PATH to S3 bucket: $BUCKET_NAME"
+main() {
+    local source_dir="$1"
+    echo "$(current_datetime) Uploading files and Final Cut Pro libraries from $source_dir to S3 bucket: $BUCKET_NAME"
+    process_uploads "$source_dir"
+}
 
-upload_directory_and_contents "$SOURCE_PATH"
+main "$SOURCE_PATH"
 
-echo "$(current_datetime) All files and Final Cut Pro libraries have been processed for upload to S3 bucket: $BUCKET_NAME"
+exit 0
