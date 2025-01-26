@@ -124,21 +124,33 @@ verify_file_exists_in_s3() {
 create_split_zip_file() {
     local dir="$1"
     local part_size="5g"
-    local part_size_bytes=$((5 * 1024 * 1024 * 1024))  # 5GB in bytes
-
+    local error_log=$(mktemp)
+    
     # Check if the file has already been split
     echo "$(current_datetime) Checking for existing split files: $(basename "${dir}").zip"
-    
+
     if compgen -G "${dir}.zip.???" > /dev/null; then
         echo "$(current_datetime) Split files exist. Skipping 7z command."
         return 0
     fi
 
     echo "$(current_datetime) Creating split 7z file $dir.zip..."
-    /usr/local/bin/7z a -mx0 -v"$part_size" "$dir".zip "$dir" || { 
-        echo "$(current_datetime) Error creating split 7z file"; 
-        exit 1; 
-    }
+    if ! /usr/local/bin/7z a -mx0 -v"$part_size" "$dir".zip "$dir" 2>"$error_log"; then
+        echo "$(current_datetime) Error creating split 7z file" >&2
+        echo "$(current_datetime) Error details:" >&2
+        cat "$error_log" >&2
+        rm -f "$error_log"
+        
+        # Clean up partial zip files
+        echo "$(current_datetime) Cleaning up partial zip files..." >&2
+        rm -f "${dir}".zip.???
+        
+        send_alert "7z Error" "Failed to create split archive for $(basename "$dir")"
+        return 1
+    fi
+    
+    rm -f "$error_log"
+    return 0
 }
 
 # Function to upload a file to S3 using multipart upload
