@@ -35,24 +35,28 @@ current_datetime() {
     fi
 }
 
-# Check if the script is already running with the same arguments
-if pgrep -f "$0 $1 $2" > /dev/null; then
-    echo "Script is already running with the same arguments. Exiting."
+# Check if script is already running with same command line
+if pgrep -f "$(echo "$0 $*" | sed 's/[^[:alnum:]]/\\&/g')" > /dev/null; then
+    echo "$(current_datetime) Script is already running with same arguments. Exiting."
     exit 1
 fi
 
-# Check if the bucket name is provided as a command line argument
+# Check if the first argument (bucket name) is provided
 if [ -z "$1" ]; then
-    echo "Usage: $0 <bucket-name> [source-path]"
+    echo "Usage: $0 <bucket-name> [source-path1 source-path2 ...]"
     exit 1
 fi
 
-# Define the S3 bucket name
+# Define the S3 bucket name from first argument
 BUCKET_NAME="$1"
+shift  # Remove bucket name from arguments
 
-# Get the source path (current directory if not provided)
-SOURCE_PATH="${2:-$(pwd)}"
+# If no paths provided, use current directory
+if [ $# -eq 0 ]; then
+    set -- "$(pwd)"
+fi
 
+# Verify AWS CLI exists
 AWS_CLI_PATH="/usr/local/bin/aws"
 if [ -z "$AWS_CLI_PATH" ]; then
     echo "$(current_datetime) AWS CLI not found. Please install it and configure your credentials."
@@ -125,32 +129,54 @@ create_split_zip_file() {
     local dir="$1"
     local part_size="5g"
     local error_log=$(mktemp)
+    local checksum_file="${dir}.zip.md5"
     
-    # Check if the file has already been split
-    echo "$(current_datetime) Checking for existing split files: $(basename "${dir}").zip"
-
-    if compgen -G "${dir}.zip.???" > /dev/null; then
-        echo "$(current_datetime) Split files exist. Skipping 7z command."
-        return 0
+    # Check if files and checksum exist
+    if compgen -G "${dir}.zip.???" > /dev/null && [ -f "$checksum_file" ]; then
+        echo "$(current_datetime) Split files and checksum exist. Verifying..."
+        if verify_zip_checksum "$dir"; then
+            echo "$(current_datetime) Checksum verified. Using existing files."
+            return 0
+        else
+            echo "$(current_datetime) Checksum mismatch. Recreating archive..."
+            rm -f "${dir}".zip.???
+            rm -f "$checksum_file"
+        fi
     fi
 
     echo "$(current_datetime) Creating split 7z file $dir.zip..."
     if ! /usr/local/bin/7z a -mx0 -v"$part_size" "$dir".zip "$dir" 2>"$error_log"; then
         echo "$(current_datetime) Error creating split 7z file" >&2
-        echo "$(current_datetime) Error details:" >&2
         cat "$error_log" >&2
-        rm -f "$error_log"
-        
-        # Clean up partial zip files
-        echo "$(current_datetime) Cleaning up partial zip files..." >&2
-        rm -f "${dir}".zip.???
-        
+        rm -f "$error_log" "${dir}".zip.??? "$checksum_file"
         send_alert "7z Error" "Failed to create split archive for $(basename "$dir")"
+        return 1
+    fi
+
+    echo "$(current_datetime) Creating checksum..."
+    # Create checksum file
+    if ! create_zip_checksum "$dir"; then
+        echo "$(current_datetime) Error creating checksum" >&2
+        rm -f "$error_log" "${dir}".zip.??? "$checksum_file"
+        send_alert "Checksum Error" "Failed to create checksum for $(basename "$dir")"
         return 1
     fi
     
     rm -f "$error_log"
     return 0
+}
+
+create_zip_checksum() {
+    local dir="$1"
+    local checksum_file="${dir}.zip.md5"
+        find "$(dirname "$dir")" -name "$(basename "$dir").zip.???" -type f -print0 | \
+        xargs -0 md5 -r > "$checksum_file"
+}
+
+verify_zip_checksum() {
+    local dir="$1"
+    local checksum_file="${dir}.zip.md5"
+    [ -f "$checksum_file" ] && md5 -c "$checksum_file" >/dev/null 2>&1
 }
 
 # Function to upload a file to S3 using multipart upload
@@ -245,20 +271,13 @@ get_incomplete_uploads() {
     while IFS= read -r zip_part; do
         local base_name=$(basename "${zip_part}" .zip.001)
         local dir_path=$(dirname "${zip_part}")
-        local zip_file="${base_name}.zip"
-        local relative_path=${dir_path#"$SOURCE_PATH/"}
-        local s3_path="$relative_path/$zip_file"
+        local checksum_file="${dir_path}/${base_name}.zip.md5"
         
-        # Check for existing multipart upload
-        upload_id=$($AWS_CLI_PATH s3api list-multipart-uploads \
-            --bucket "$BUCKET_NAME" \
-            --query "Uploads[?Key=='$s3_path'].UploadId" \
-            --output text)
-            
-        if [ -n "$upload_id" ] && [ "$upload_id" != "None" ]; then
+        # Only process if checksum file exists and verifies
+        if [ -f "$checksum_file" ] && verify_zip_checksum "${dir_path}/${base_name}"; then
             incomplete+=("${dir_path}/${base_name}")
         fi
-    done < <(find_zip_parts "$search_dir")
+    done < <(find "$search_dir" -name "*.zip.001" -type f)
     
     echo "${incomplete[@]}"
 }
@@ -285,11 +304,7 @@ process_uploads() {
             echo "----------------------------------------"
             echo "$(current_datetime) Resuming upload: $(basename "$upload")"
             local relative_path=${upload#"$SOURCE_PATH/"}
-            echo relative_path "$relative_path"
             local s3_path="$(dirname "$relative_path")/$(basename "$upload").zip"
-            echo s3_path "$s3_path"
-            # TODO Fix the s3 path that is the expected second argument
-            echo multipart_upload_to_s3 "$upload" "$s3_path"
             multipart_upload_to_s3 "$upload" "$s3_path"
         done
     fi
@@ -322,10 +337,24 @@ process_uploads() {
 }
 
 main() {
-    local source_dir="$1"
-    echo "$(current_datetime) Uploading files and Final Cut Pro libraries from $source_dir to S3 bucket: $BUCKET_NAME"
-    process_uploads "$source_dir"
+    echo "$(current_datetime) Starting upload process to S3 bucket: $BUCKET_NAME"
+    
+    # Process each source path
+    for source_dir in "$@"; do
+        if [ ! -d "$source_dir" ]; then
+            echo "$(current_datetime) Warning: Directory not found - $source_dir"
+            continue
+        fi
+        
+        echo ""
+        echo "========================================"
+        echo "$(current_datetime) Processing directory: $source_dir"
+        echo "========================================"
+        
+        process_uploads "$source_dir"
+    done
 }
 
-main "$SOURCE_PATH"
+# Run the main function with all arguments
+main "$@"
 exit 0

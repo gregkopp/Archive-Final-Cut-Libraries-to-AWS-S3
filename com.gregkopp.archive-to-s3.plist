@@ -9,6 +9,7 @@
             <string>/usr/local/bin/archive-to-s3.sh</string>
             <string>**** S3 Bucket Name ****</string>
             <string>**** Path to Local FCP Archive Folder ****</string>
+            <string>**** Path to Local FCP Archive Folder ****</string>
         </array>
         <key>StartInterval</key>
         <integer>900</integer>
