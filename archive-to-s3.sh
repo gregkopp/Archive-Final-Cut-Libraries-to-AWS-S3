@@ -35,9 +35,9 @@ current_datetime() {
     fi
 }
 
-# Check if script is already running with same command line
+# Check if the script is already running with same command line and parameters
 if pgrep -f "$(echo "$0 $*" | sed 's/[^[:alnum:]]/\\&/g')" > /dev/null; then
-    echo "$(current_datetime) Script is already running with same arguments. Exiting."
+    echo "$(current_datetime) Script is already running with the same arguments. Exiting."
     exit 1
 fi
 
@@ -55,6 +55,8 @@ shift  # Remove bucket name from arguments
 if [ $# -eq 0 ]; then
     set -- "$(pwd)"
 fi
+
+# SOURCE_PATH="$(pwd)"
 
 # Verify AWS CLI exists
 AWS_CLI_PATH="/usr/local/bin/aws"
@@ -78,6 +80,7 @@ check_file_exists_in_s3() {
 # Function to verify file exists in S3
 verify_file_exists_in_s3() {
     local file_path="$1"
+    local source_dir="$2"
     echo "$(current_datetime) Verifying if $(basename "$file_path").zip exists in S3 bucket..."
     
     # Calculate total size of all zip parts
@@ -96,7 +99,7 @@ verify_file_exists_in_s3() {
         local_size=$((local_size + part_size))
     done < <(cd "$dir_path" && find . -maxdepth 1 -name "${file_name}.zip.???" -print0)
 
-    local relative_path=${dir_path#"$SOURCE_PATH/"}
+    local relative_path=${dir_path#"$source_dir/"}
     local s3_path="$relative_path/$file_name.zip"
     local s3_size=$($AWS_CLI_PATH s3api head-object \
         --bucket "$BUCKET_NAME" \
@@ -183,6 +186,7 @@ verify_zip_checksum() {
 multipart_upload_to_s3() {
     local dir="$1"
     local s3_path="$2"
+    local source_dir="$3"
 
     # Create split zip file
     create_split_zip_file "$dir"
@@ -245,7 +249,7 @@ multipart_upload_to_s3() {
     
     # Verify upload and clean up
     echo "$(current_datetime) Verifying upload for $s3_path..."
-    if verify_file_exists_in_s3 "$dir"; then
+    if verify_file_exists_in_s3 "$dir" "$source_dir"; then
         echo "$(current_datetime) Upload verified. Cleaning up local zip files..."
         rm "${dir}".zip.??? 2>/dev/null
         echo "$(current_datetime) Local zip files removed for $(basename "$dir")"
@@ -300,12 +304,12 @@ process_uploads() {
         work_found=1
         echo "$(current_datetime) Found ${#incomplete_uploads[@]} incomplete uploads"
         for upload in "${incomplete_uploads[@]}"; do
+            local relative_path=${upload#"$source_dir/"}
+            local s3_path="$(dirname "$relative_path")/$(basename "$upload").zip"
             echo ""
             echo "----------------------------------------"
-            echo "$(current_datetime) Resuming upload: $(basename "$upload")"
-            local relative_path=${upload#"$SOURCE_PATH/"}
-            local s3_path="$(dirname "$relative_path")/$(basename "$upload").zip"
-            multipart_upload_to_s3 "$upload" "$s3_path"
+            echo "$(current_datetime) Resuming upload: $relative_path.zip"
+            multipart_upload_to_s3 "$upload" "$s3_path" "$source_dir"
         done
     fi
     
@@ -317,7 +321,7 @@ process_uploads() {
             echo ""
             echo "----------------------------------------"
             local zip_file="${dir}.zip"
-            local relative_path=${dir#"$SOURCE_PATH/"}
+            local relative_path=${dir#"$source_dir/"}
             local s3_path="$(dirname "$relative_path")/$(basename "$zip_file")"
             if check_file_exists_in_s3 "$s3_path"; then
                 echo "$(current_datetime) Skipping ${dir} - already processed"
