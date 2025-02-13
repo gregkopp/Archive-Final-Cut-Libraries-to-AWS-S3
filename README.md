@@ -7,13 +7,13 @@ This repository contains a script to archive files and upload them to an Amazon 
 To use the script, run the following command:
 
 ```sh
-./archive-to-s3.sh <bucket-name> [source-path]
+./archive-to-s3.sh <bucket-name> [source-path1 source-path2 ...]
 ```
 
 ## Parameters
 
 - bucket-name: (Required) The name of your S3 bucket
-- source-path: (Optional) Path to the directory to archive. Defaults to current working directory if omitted
+- source-path: (Optional) Path to directories to archive. Defaults to current working directory if omitted
 
 ## Examples
 
@@ -50,3 +50,5 @@ For more information about this license, see the full legal text here: [Creative
 ## Copyright
 
 © 2025 Greg Kopp. All rights reserved.
+
+[http://www.youtube.com/@mylilmule](https://www.youtube.com/@mylilmule)
