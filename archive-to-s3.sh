@@ -171,7 +171,7 @@ multipart_upload_to_s3() {
     # Upload each part
     part_number=1
     parts=""
-    for part in "${dir}".zip.*; do
+    for part in "${dir}".zip.[0-9][0-9][0-9]; do
         # Check if part already exists
         if echo "$existing_parts" | grep -q "\"PartNumber\": $part_number"; then
             echo "$(current_datetime) Part $part_number already exists. Skipping upload."
