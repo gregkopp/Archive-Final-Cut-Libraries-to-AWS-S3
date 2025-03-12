@@ -66,19 +66,16 @@ check_file_exists_in_s3() {
 
 # Function to verify file exists in S3
 verify_file_exists_in_s3() {
-    local file_path="$1"
-    local source_dir="$2"
-    echo "$(current_datetime) Verifying if $(basename "$file_path").zip exists in S3 bucket..."
-
-    local relative_path=${file_path#"$source_dir/"}
-    local s3_path="$relative_path.zip"
+    local s3_path="$1"
+    echo "$(current_datetime) Verifying if $(basename "$s3_path").zip exists in S3 bucket..."
 
     # Check if the file exists in S3
+    echo "s3 ls s3://$BUCKET_NAME/$s3_path"
     if ! $AWS_CLI_PATH s3 ls "s3://$BUCKET_NAME/$s3_path" &>/dev/null; then
-        echo "$(current_datetime) File $(basename "$file_path").zip not found in S3"
+        echo "$(current_datetime) File $(basename "$s3_path").zip not found in S3"
         return 1
     else
-        echo "$(current_datetime) File $(basename "$file_path").zip exists in S3"
+        echo "$(current_datetime) File $(basename "$s3_path").zip exists in S3"
         return 0
     fi
 }
@@ -97,11 +94,10 @@ create_split_zip_file() {
             return 0
         else
             echo "$(current_datetime) Checksum mismatch. Recreating archive..."
-            rm -f "${dir}".zip.???
-            rm -f "$checksum_file"
         fi
     fi
 
+    rm -f "${dir}".zip.??? "$checksum_file"
     echo "$(current_datetime) Creating split 7z file $dir.zip..."
     if ! /usr/local/bin/7z a -mx0 -v"$part_size" "$dir".zip "$dir" 2>"$error_log"; then
         echo "$(current_datetime) Error creating split 7z file" | tee /dev/stderr
@@ -198,7 +194,7 @@ multipart_upload_to_s3() {
 
     # Verify upload and clean up
     echo "$(current_datetime) Verifying upload for $s3_path..."
-    if verify_file_exists_in_s3 "$dir" "$source_dir"; then
+    if verify_file_exists_in_s3 "$s3_path"; then
         echo "$(current_datetime) Upload verified. Cleaning up local zip files..."
         rm "${dir}".zip.??? 2>/dev/null
         echo "$(current_datetime) Local zip files removed for $(basename "$dir")"
@@ -234,7 +230,7 @@ get_incomplete_uploads() {
     echo "${incomplete[@]}"
 }
 
-process_uploads() {
+process_incomplete_uploads() {
     local source_dir="$1"
     local work_found=0
 
@@ -260,7 +256,15 @@ process_uploads() {
         done
     fi
 
-    # Second pass - process new files
+    if [ $work_found -eq 0 ]; then
+        echo "$(current_datetime) No incomplete uploads found."
+    fi
+}
+
+process_new_uploads() {
+    local source_dir="$1"
+    local work_found=0
+
     echo "$(current_datetime) Scanning for new files..."
     local new_files=0
     while IFS= read -r dir; do
@@ -281,7 +285,7 @@ process_uploads() {
     done < <(find "$source_dir" -name "*.fcpbundle" -type d)
 
     if [ $work_found -eq 0 ]; then
-        echo "$(current_datetime) No files found."
+        echo "$(current_datetime) No new files found."
     fi
 }
 
@@ -292,6 +296,7 @@ main() {
     echo "========================================"
 
     # Process each source path
+    echo "$(current_datetime) Checking for incomplete uploads..."
     for source_dir in "$@"; do
         if [ ! -d "$source_dir" ]; then
             echo "$(current_datetime) Warning: Directory not found - $source_dir"
@@ -300,7 +305,20 @@ main() {
 
         echo "$(current_datetime) Processing directory: $source_dir"
 
-        process_uploads "$source_dir"
+        process_incomplete_uploads "$source_dir"
+    done
+
+    # Process each source path
+    echo "$(current_datetime) Checking for new files..."
+    for source_dir in "$@"; do
+        if [ ! -d "$source_dir" ]; then
+            echo "$(current_datetime) Warning: Directory not found - $source_dir"
+            continue
+        fi
+
+        echo "$(current_datetime) Processing directory: $source_dir"
+
+        process_new_uploads "$source_dir"
     done
 
     echo ""
